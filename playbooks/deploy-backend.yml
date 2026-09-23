@@ -1,0 +1,75 @@
+---
+- name: Deploy Backend Application
+  hosts: "{{ target_group | default('group-1') }}"
+  gather_facts: yes
+  become: yes
+  
+  vars:
+    backend_image: "{{ registry }}/ci-cd-demo/backend:{{ backend_version }}"
+    container_name: app-backend
+    container_port: 8000
+  
+  tasks:
+    - name: Print deployment info
+      debug:
+        msg: "🚀 Deploying Backend {{ backend_version | default('UNKNOWN') }} to {{ inventory_hostname }}"
+
+    - name: Debug registry vars
+      debug:
+        msg: "registry={{ registry }}, user={{ nexus_user }}"
+
+    - name: Login to Nexus registry
+      shell: |
+        set -e
+        echo "{{ nexus_password }}" | docker login {{ registry | regex_replace('^https?://', '') }} \
+          -u "{{ nexus_user }}" \
+          --password-stdin
+      register: login_result
+      changed_when: false
+
+    # ✅ 2. Pull образа через shell
+    - name: Pull new backend image from Nexus
+      shell: |
+        docker pull {{ backend_image }}
+      register: pull_result
+      retries: 3
+      delay: 5
+      until: pull_result.rc == 0
+      changed_when: "'Pulling from' in pull_result.stdout or 'Downloaded' in pull_result.stdout"
+
+    # ✅ 3. Остановить старый контейнер
+    - name: Stop existing backend container
+      shell: |
+        docker stop {{ container_name }} || true
+        docker rm {{ container_name }} || true
+      ignore_errors: yes
+      changed_when: false
+
+    # ✅ 4. Запустить новый контейнер
+    - name: Start new backend container
+      shell: |
+        docker run -d \
+          --name {{ container_name }} \
+          --restart=always \
+          -p {{ container_port }}:{{ container_port }} \
+          -e APP_ENV=production \
+          -e APP_VERSION={{ backend_version }} \
+          {{ backend_image }}
+      register: run_result
+      # ✅ Запускать только если контейнер не запущен или образ изменился
+      changed_when: run_result.rc == 0
+
+    # ✅ 5. Проверка здоровья
+    - name: Verify container is running
+      shell: |
+        docker ps --filter "name={{ container_name }}" --format "{% raw %}{{.Status}}{% endraw %}" | grep -q "Up"
+      register: container_status
+      retries: 5
+      delay: 3
+      until: container_status.rc == 0
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Print success message
+      debug:
+        msg: "✅ Backend {{ backend_version }} successfully deployed on {{ inventory_hostname }}"

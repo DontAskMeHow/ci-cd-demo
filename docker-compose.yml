@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  nginx:
+    image: ${IMAGE_PATH}/nginx:${IMAGE_TAG}    # <-- добавлено
+    build: ./nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - app-net
+
+  backend:
+    image: ${IMAGE_PATH}/backend:${IMAGE_TAG}  # <-- добавлено
+    build: ./backend
+    environment:
+      - PORT=8000
+    expose:
+      - "8000"
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge

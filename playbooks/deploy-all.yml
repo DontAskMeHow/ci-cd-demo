@@ -1,0 +1,186 @@
+---
+- name: Deploy All Applications (Backend + Nginx)
+  hosts: "{{ target_group | default('all') }}"
+  gather_facts: yes
+  become: yes
+  
+  vars:
+    backend_image: "{{ registry }}/ci-cd-demo/backend:{{ backend_version }}"
+    nginx_image: "{{ registry }}/ci-cd-demo/nginx:{{ nginx_version }}"
+    backend_container_name: app-backend
+    nginx_container_name: app-nginx
+    backend_port: 8000
+    nginx_http_port: 80
+    nginx_https_port: 443
+  
+  tasks:
+    # ========================================================================
+    # ИНФОРМАЦИЯ О ДЕПЛОЕ
+    # ========================================================================
+    - name: Print deployment info
+      debug:
+        msg: |
+          🚀 Starting Full Deployment
+          ─────────────────────────────────
+          Host: {{ inventory_hostname }}
+          Backend Version: {{ backend_version }}
+          Nginx Version: {{ nginx_version }}
+          Registry: {{ registry }}
+          ─────────────────────────────────
+
+    # ========================================================================
+    # BACKEND - PULL IMAGE
+    # ========================================================================
+    - name: Pull new backend image from Nexus
+      docker_image:
+        name: "{{ backend_image }}"
+        source: pull
+        registry:
+          url: "{{ registry }}"
+          username: "{{ nexus_user }}"
+          password: "{{ nexus_password }}"
+      register: backend_pull
+      retries: 3
+      delay: 5
+      when: backend_version is defined
+
+    # ========================================================================
+    # NGINX - PULL IMAGE
+    # ========================================================================
+    - name: Pull new nginx image from Nexus
+      docker_image:
+        name: "{{ nginx_image }}"
+        source: pull
+        registry:
+          url: "{{ registry }}"
+          username: "{{ nexus_user }}"
+          password: "{{ nexus_password }}"
+      register: nginx_pull
+      retries: 3
+      delay: 5
+      when: nginx_version is defined
+
+    # ========================================================================
+    # BACKEND - STOP & REMOVE OLD CONTAINER
+    # ========================================================================
+    - name: Stop existing backend container
+      docker_container:
+        name: "{{ backend_container_name }}"
+        state: stopped
+        force_kill: yes
+      ignore_errors: yes
+      when: backend_version is defined
+
+    - name: Remove old backend container
+      docker_container:
+        name: "{{ backend_container_name }}"
+        state: absent
+      when: backend_version is defined
+
+    # ========================================================================
+    # NGINX - STOP & REMOVE OLD CONTAINER
+    # ========================================================================
+    - name: Stop existing nginx container
+      docker_container:
+        name: "{{ nginx_container_name }}"
+        state: stopped
+        force_kill: yes
+      ignore_errors: yes
+      when: nginx_version is defined
+
+    - name: Remove old nginx container
+      docker_container:
+        name: "{{ nginx_container_name }}"
+        state: absent
+      when: nginx_version is defined
+
+    # ========================================================================
+    # BACKEND - START NEW CONTAINER
+    # ========================================================================
+    - name: Start new backend container
+      docker_container:
+        name: "{{ backend_container_name }}"
+        image: "{{ backend_image }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ backend_port }}:{{ backend_port }}"
+        env:
+          APP_ENV: production
+          APP_VERSION: "{{ backend_version }}"
+        volumes:
+          - /var/log/app-backend:/var/log/app
+        networks:
+          - name: app-network
+      when: backend_version is defined
+
+    # ========================================================================
+    # NGINX - START NEW CONTAINER
+    # ========================================================================
+    - name: Start new nginx container
+      docker_container:
+        name: "{{ nginx_container_name }}"
+        image: "{{ nginx_image }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ nginx_http_port }}:{{ nginx_http_port }}"
+          - "{{ nginx_https_port }}:{{ nginx_https_port }}"
+        volumes:
+          - /var/log/nginx:/var/log/nginx
+          - /etc/nginx/conf.d:/etc/nginx/conf.d:ro
+        networks:
+          - name: app-network
+      when: nginx_version is defined
+
+    # ========================================================================
+    # BACKEND - HEALTH CHECK
+    # ========================================================================
+    - name: Wait for backend to be ready
+      uri:
+        url: "http://localhost:{{ backend_port }}/health"
+        status_code: 200
+      register: backend_health
+      retries: 15
+      delay: 5
+      until: backend_health.status == 200
+      ignore_errors: yes
+      when: backend_version is defined
+
+    # ========================================================================
+    # NGINX - HEALTH CHECK
+    # ========================================================================
+    - name: Wait for nginx to be ready
+      uri:
+        url: "http://localhost:{{ nginx_http_port }}/"
+        status_code: 200
+      register: nginx_health
+      retries: 15
+      delay: 5
+      until: nginx_health.status == 200
+      ignore_errors: yes
+      when: nginx_version is defined
+
+    # ========================================================================
+    # FINAL REPORT
+    # ========================================================================
+    - name: Print deployment summary
+      debug:
+        msg: |
+          ✅ Deployment Summary for {{ inventory_hostname }}
+          ─────────────────────────────────
+          Backend: {{ '✅ OK' if backend_health.status == 200 else '❌ FAILED' if backend_version is defined else '⏭️ SKIPPED' }}
+          Nginx:   {{ '✅ OK' if nginx_health.status == 200 else '❌ FAILED' if nginx_version is defined else '⏭️ SKIPPED' }}
+          ─────────────────────────────────
+
+  # ============================================================================
+  # ROLLBACK (опционально - при неудачном health-check)
+  # ============================================================================
+  rescue:
+    - name: Deployment failed - printing error
+      debug:
+        msg: "❌ Deployment failed on {{ inventory_hostname }}. Check logs for details."
+
+    - name: Optionally rollback (placeholder)
+      debug:
+        msg: "Rollback logic can be added here (e.g., redeploy previous version)"

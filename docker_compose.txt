@@ -1,0 +1,24 @@
+services:
+  nginx:
+    image: registry.example.com/ci-cd-demo/nginx:0.0.1
+    container_name: nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - app-net
+
+  backend:
+    image: registry.example.com/ci-cd-demo/backend:0.0.1
+    container_name: backend
+    environment:
+      - PORT=8000
+    expose:
+      - "8000"
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge

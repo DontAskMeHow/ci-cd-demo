@@ -1,0 +1,176 @@
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - when: never
+
+stages:
+  - deploy
+
+# ============================================================================
+# ШАБЛОН
+# ============================================================================
+.deploy_template: &deploy_template
+  stage: deploy
+  image: docker:24.0.7-cli
+  tags: [deploy]
+
+  variables:
+    DOCKER_HOST: "unix:///var/run/docker.sock"
+    DOCKER_TLS_CERTDIR: ""
+    APP_NAME: ""
+    TARGET_GROUP: ""
+
+  needs: []
+
+  rules:
+    - when: manual
+
+  before_script:
+    # 🔹 1. Проверка что это TAG pipeline
+    - |
+      if [ -z "${CI_COMMIT_TAG}" ]; then
+        echo "❌ Deploy only from tag!"
+        exit 1
+      fi
+
+    # 🔹 2. Проверка release файла
+    - |
+      RELEASE_CONFIG="releases/${CI_COMMIT_TAG}.yml"
+
+      echo "🔍 Looking for ${RELEASE_CONFIG}"
+      ls -la releases || true
+
+      if [ ! -f "${RELEASE_CONFIG}" ]; then
+        echo "❌ Config not found: ${RELEASE_CONFIG}"
+        exit 1
+      fi
+
+      echo "✅ Found release config"
+
+    # 🔹 3. Парсим release
+    - |
+      while IFS=': ' read -r key value; do
+        [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+        value=$(echo "$value" | tr -d '"' | tr -d "'" | xargs)
+
+        case "$key" in
+          backend) export RELEASE_BACKEND="$value" ;;
+          nginx)   export RELEASE_NGINX="$value" ;;
+          default_groups) export DEFAULT_GROUPS="$value" ;;
+        esac
+      done < "${RELEASE_CONFIG}"
+
+      echo "📦 backend=${RELEASE_BACKEND}"
+      echo "📦 nginx=${RELEASE_NGINX}"
+    - |
+      # 🔹 4. Проверка Docker
+      docker info --format '{{.ServerVersion}}' || { echo "❌ Docker error"; exit 1; }
+
+    - |
+      # 🔹 5. Проверка ansible-control (исправлено: одна строка)
+      if ! docker ps --filter "name=ansible-control" --format "{{.Names}}" | grep -q "ansible-control"; then
+        echo "❌ ansible-control not running"
+        exit 1
+      fi
+
+    # 🔹 6. Копируем ansible файлы
+    - |
+      rm -rf /ansible-shared/playbooks/* /ansible-shared/inventory/* 2>/dev/null || true
+
+      mkdir -p /ansible-shared/playbooks /ansible-shared/inventory
+
+      cp -rf "${CI_PROJECT_DIR}/playbooks/." /ansible-shared/playbooks/ || true
+      cp -rf "${CI_PROJECT_DIR}/inventory/." /ansible-shared/inventory/ || true
+      cp -f "${CI_PROJECT_DIR}/ansible.cfg" /ansible-shared/ || true
+
+  script:
+    - |
+      set -e
+
+      echo "🚀 Deploy ${APP_NAME} → ${TARGET_GROUP}"
+
+      case "${APP_NAME}" in
+        backend)
+          PLAYBOOK="deploy-backend.yml"
+          EXTRA="backend_version=${RELEASE_BACKEND}"
+          ;;
+        nginx)
+          PLAYBOOK="deploy-nginx.yml"
+          EXTRA="nginx_version=${RELEASE_NGINX}"
+          ;;
+        all)
+          PLAYBOOK="deploy-all.yml"
+          EXTRA="backend_version=${RELEASE_BACKEND} nginx_version=${RELEASE_NGINX}"
+          ;;
+        *)
+          echo "❌ Unknown APP_NAME"
+          exit 1
+          ;;
+      esac
+
+      echo "🔍 Using playbook: ${PLAYBOOK}"
+
+      docker exec ansible-control test -f "/ansible-shared/playbooks/${PLAYBOOK}" \
+        || { echo "❌ Playbook not found"; exit 1; }
+
+      docker exec ansible-control \
+        ansible-playbook \
+          -i /ansible-shared/inventory/hosts.ini \
+          /ansible-shared/playbooks/${PLAYBOOK} \
+          --extra-vars "${EXTRA} registry=${NEXUS_REGISTRY} target_group=${TARGET_GROUP} nexus_user=${NEXUS_USER} nexus_password=${NEXUS_PASSWORD}" \
+          --private-key /root/.ssh/id_ed25519 \
+          -v
+
+      echo "✅ Deploy completed: ${APP_NAME} → ${TARGET_GROUP}"
+
+# ============================================================================
+# ДЖОБЫ
+# ============================================================================
+
+deploy-backend-group-1:
+  <<: *deploy_template
+  variables:
+    APP_NAME: "backend"
+    TARGET_GROUP: "group-1"
+  resource_group: deploy-backend-group-1
+  environment:
+    name: Production/Group-1/Backend
+    url: http://192.0.2.10:8000
+
+deploy-backend-group-2:
+  <<: *deploy_template
+  variables:
+    APP_NAME: "backend"
+    TARGET_GROUP: "group-2"
+  resource_group: deploy-backend-group-2
+  environment:
+    name: Production/Group-2/Backend
+    url: http://192.0.2.20:8000
+
+deploy-nginx-group-1:
+  <<: *deploy_template
+  variables:
+    APP_NAME: "nginx"
+    TARGET_GROUP: "group-1"
+  resource_group: deploy-nginx-group-1
+  environment:
+    name: Production/Group-1/Nginx
+    url: http://192.0.2.10
+
+deploy-nginx-group-2:
+  <<: *deploy_template
+  variables:
+    APP_NAME: "nginx"
+    TARGET_GROUP: "group-2"
+  resource_group: deploy-nginx-group-2
+  environment:
+    name: Production/Group-2/Nginx
+    url: http://192.0.2.20
+
+deploy-all-production:
+  <<: *deploy_template
+  variables:
+    APP_NAME: "all"
+    TARGET_GROUP: "all"
+  environment:
+    name: Production/All

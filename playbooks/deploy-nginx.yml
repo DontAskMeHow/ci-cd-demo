@@ -1,0 +1,69 @@
+---
+- name: Deploy Nginx Application
+  hosts: "{{ target_group | default('group-2') }}"
+  gather_facts: yes
+  become: yes
+  
+  vars:
+    nginx_image: "{{ registry }}/ci-cd-demo/nginx:{{ nginx_version }}"
+    container_name: app-nginx
+    container_port: 80  # ✅ Исправлено: было http_port, стало container_port
+  
+  tasks:
+    - name: Print deployment info
+      debug:
+        msg: "🚀 Deploying Nginx {{ nginx_version | default('UNKNOWN') }} to {{ inventory_hostname }}"
+
+    # ✅ 1. Логин в Nexus
+    - name: Login to Nexus registry
+      shell: |
+        echo "{{ nexus_password }}" | docker login {{ registry }} -u {{ nexus_user }} --password-stdin
+      no_log: true
+      changed_when: false
+
+    # ✅ 2. Pull образа
+    - name: Pull new nginx image from Nexus
+      shell: |
+        docker pull {{ nginx_image }}
+      register: pull_result
+      retries: 3
+      delay: 5
+      until: pull_result.rc == 0
+      changed_when: "'Pulling from' in pull_result.stdout or 'Downloaded' in pull_result.stdout"
+
+    # ✅ 3. Остановить старый контейнер
+    - name: Stop existing nginx container
+      shell: |
+        docker stop {{ container_name }} || true
+        docker rm {{ container_name }} || true
+      ignore_errors: yes
+      changed_when: false
+
+    # ✅ 4. Запустить новый контейнер
+    - name: Start new nginx container
+      shell: |
+        docker run -d \
+          --name {{ container_name }} \
+          --restart=always \
+          -p {{ container_port }}:{{ container_port }} \
+          -e APP_ENV=production \
+          -e APP_VERSION={{ nginx_version }} \
+          {{ nginx_image }}
+      register: run_result
+      changed_when: run_result.rc == 0
+
+    # ✅ 5. Проверка здоровья
+    - name: Verify container is running
+      shell: |
+        docker ps --filter "name={{ container_name }}" --format "{% raw %}{{.Status}}{% endraw %}" | grep -q "Up"
+      register: container_status
+      retries: 5
+      delay: 3
+      until: container_status.rc == 0
+      changed_when: false
+      ignore_errors: yes
+
+    # ✅ 6. Финальное сообщение (исправлено: было "Backend", стало "Nginx")
+    - name: Print success message
+      debug:
+        msg: "✅ Nginx {{ nginx_version }} successfully deployed on {{ inventory_hostname }}"

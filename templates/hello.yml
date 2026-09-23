@@ -1,0 +1,9 @@
+---
+spec:
+  inputs:
+    stage:
+      default: test
+---
+.job-template:
+  stage: $[[ inputs.stage ]]
+  script: echo "Hello from Component!"
